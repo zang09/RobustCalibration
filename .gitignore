@@ -1,0 +1,9 @@
+*.pyc
+.vscode
+output
+build
+data
+*.ply
+**/PKG-INFO
+**__pycache__**
+times.txt

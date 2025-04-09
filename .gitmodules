@@ -1,6 +1,6 @@
-[submodule "submodules/diff-surfel-rasterization.git"]
-	path = submodules/diff-surfel-rasterization.git
-	url = https://github.com/ShuyiZhou495/diff-surfel-rasterization.git
 [submodule "submodules/Python-VO"]
 	path = submodules/Python-VO
 	url = https://github.com/ShuyiZhou495/Python-VO.git
+[submodule "submodules/diff-surfel-rasterization"]
+	path = submodules/diff-surfel-rasterization
+	url = https://github.com/ShuyiZhou495/diff-surfel-rasterization.git

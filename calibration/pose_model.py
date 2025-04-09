@@ -41,7 +41,7 @@ class Pose(torch.nn.Module):
         ext = torch.cat((self.R.weight[0], self.t.weight[0]))
         return SE3(se3=ext + self.init) # [3, 4]
     
-    @torch.no_grad
+    @torch.no_grad()
     def change_rate(self):
         ext = self.forward()
         t = np.array(ext.t.cpu().tolist())
@@ -49,11 +49,17 @@ class Pose(torch.nn.Module):
         self.change.append([t, rot])
         if len(self.change) > 500:
             self.change.pop(0)
-        return [np.linalg.norm((self.change[-1][0] - self.change[0][0]) / len(self.change)), 
-                np.rad2deg(np.linalg.norm(Rotation.from_matrix(self.change[-1][1].transpose() @ self.change[0][1]).as_rotvec()))
-                ]
+
+        position_change = np.linalg.norm((self.change[-1][0] - self.change[0][0]) / len(self.change))
+        rotation_change = np.rad2deg(
+            np.linalg.norm(
+            Rotation.from_matrix(self.change[-1][1].T @ self.change[0][1]).as_rotvec()
+            )
+        )
+        return [position_change, rotation_change]
+    
     @property
-    @torch.no_grad
+    @torch.no_grad()
     def get_error(self):
         error = self.correct.invert() @ self.forward()
         error_R = error.R.cpu().numpy()

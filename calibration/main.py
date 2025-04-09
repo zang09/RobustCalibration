@@ -9,7 +9,7 @@ from tqdm import trange
 import numpy as np
 from matplotlib import pyplot as plt
 import torch
-os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+# os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 from torch.utils.tensorboard import SummaryWriter
 from torch.nn import functional as F
 import json

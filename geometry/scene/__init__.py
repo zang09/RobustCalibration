@@ -41,7 +41,7 @@ class Scene:
 
         self.train_cameras = {}
         self.test_cameras = {}
-        scene_info = sceneLoadTypeCallbacks["KITTI"](args.source_path, args.save_dir, args.num, args.start_frame)
+        scene_info = sceneLoadTypeCallbacks["KITTI"](args.source_path, args.scene_dir, args.num, args.start_frame)
 
         if not self.loaded_iter:
             json_cams = []

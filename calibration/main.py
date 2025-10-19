@@ -6,9 +6,11 @@ from loader import Loader, VODB
 from pose_model import Pose
 from gaussian_model import GaussianModel
 from tqdm import trange
+from tqdm import tqdm
 import numpy as np
 from matplotlib import pyplot as plt
 import torch
+import torchvision
 # os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 from torch.utils.tensorboard import SummaryWriter
 from torch.nn import functional as F
@@ -191,10 +193,10 @@ def parse(file_name):
     opt = yaml.safe_load(Path(file_name).read_text())
     return edict(opt)
 
-def create_pose(opt, gt_ext):
-    ext = Pose(opt, gt_ext).cuda()
-    R_params = {"params": ext.R.parameters(), "lr": 1e-2}
-    t_params = {"params": ext.t.parameters(), "lr": 5e-4}
+def create_pose(opt, gt_ext, init_ext):
+    ext = Pose(opt, gt_ext, init_ext).cuda()
+    R_params = {"params": ext.R.parameters(), "lr": opt.config.rot_lr}
+    t_params = {"params": ext.t.parameters(), "lr": opt.config.tran_lr}
     optimizer = torch.optim.Adam([R_params, t_params])
     scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, 0.9999)
     return ext, optimizer, scheduler
@@ -203,8 +205,7 @@ def load_gaussians(opt, color=False):
     gaussians = GaussianModel(color=color)
     fn = "2dgs-test.pth"
     checkpoint_path = os.path.join(
-            opt.output, 
-            opt.g,
+            opt.model,
             fn
             )
     (model_params, first_iter) = torch.load(checkpoint_path)
@@ -223,16 +224,13 @@ def l2(a, b, w=None):
 def l1(a, b):
     return (a - b).abs().mean()
 
-def train_gaussian(opt, train_cams, feature_db, gt_ext, writer):
-    total = 15000
-    lambda_tri = 1
-    lambda_repr = 200
-    
-
+def train_gaussian(opt, train_cams, feature_db, gt_ext, init_ext, writer):
+    output_dir = opt.model
     gaussians, optimizer_color = load_gaussians(opt, color=True)
-    ext, optimizer_pose, sched = create_pose(opt, gt_ext)
+    ext, optimizer_pose, sched = create_pose(opt, gt_ext, init_ext)
     with torch.no_grad():
-        print(ext().mat.tolist())
+        print("Init method:", opt.config.init_method)
+        print("Init extrinsic:", ext().mat.tolist())
         error_R, error_t = ext.get_error
         obj = {
             "inital": {
@@ -242,13 +240,10 @@ def train_gaussian(opt, train_cams, feature_db, gt_ext, writer):
                 "R_abs": np.linalg.norm(error_R).tolist(),
                 "t_abs": np.linalg.norm(error_t).tolist()
             }
-            }
+        }
 
-    progress = trange(total)
+    progress = trange(opt.config.iterations, desc="Training iterations")
     stack = []
-
-    output_dir = f"./{opt.output}/{opt.g}"
-    os.makedirs(output_dir, exist_ok=True)
 
     flag1, flag2, flagR = False, False, float("inf")
     score_sum = torch.zeros(3, dtype=torch.float, device="cuda")
@@ -277,7 +272,7 @@ def train_gaussian(opt, train_cams, feature_db, gt_ext, writer):
         rcp = 0
         tri_loss = 0
         loss = l2(gt_colors, color.permute(1, 2, 0)[reachable_mask], w=uncertaind[reachable_mask])
-        if it > 10000:
+        if it > opt.config.loss_detach_iter:
             loss_sum[0] += loss.detach()
             loss_num[0] += 1
         score = None
@@ -319,15 +314,15 @@ def train_gaussian(opt, train_cams, feature_db, gt_ext, writer):
                     tri_loss += tri_loss1
         
         if rc > 0:
-            tri_loss = tri_loss / rc * lambda_tri
+            tri_loss = tri_loss / rc * opt.config.lambda_tri
             loss += tri_loss
-            if it > 10000:
+            if it > opt.config.loss_detach_iter:
                 loss_sum[1] += tri_loss.detach()
                 loss_num[1] += 1
         if rcp > 0:
-            repr_loss = repr_loss / rcp * lambda_repr
+            repr_loss = repr_loss / rcp * opt.config.lambda_repr
             loss += repr_loss
-            if it > 10000:
+            if it > opt.config.loss_detach_iter:
                 loss_sum[2] += repr_loss.detach()
                 loss_num[2] += 1
         loss.backward()
@@ -375,15 +370,14 @@ def train_gaussian(opt, train_cams, feature_db, gt_ext, writer):
             optimizer_pose.step()
             optimizer_pose.zero_grad()
     with torch.no_grad():
-        print(ext().mat.tolist())
         error_R, error_t = ext.get_error
         obj["res"] = {
-                "mat": ext().mat.tolist(),
-                "R": error_R.tolist(),
-                "t": error_t.tolist(),
-                "R_abs": np.linalg.norm(error_R).tolist(),
-                "t_abs": np.linalg.norm(error_t).tolist()
-            }
+            "mat": ext().mat.tolist(),
+            "R": error_R.tolist(),
+            "t": error_t.tolist(),
+            "R_abs": np.linalg.norm(error_R).tolist(),
+            "t_abs": np.linalg.norm(error_t).tolist()
+        }
         obj["scores"] = {
             "tri_score" : ( score_sum / (score_num + 1e-6)).tolist(),
             "tri_score_inv": ( score_inv_sum / (score_num + 1e-6)).tolist(),
@@ -393,10 +387,10 @@ def train_gaussian(opt, train_cams, feature_db, gt_ext, writer):
             "loss_numbers": loss_num.tolist()
         }
     end_time = time.time()
-    with open("times.txt", "a") as f:
+    with open(f"{output_dir}/times.txt", "w") as f:
         f.write(f"{end_time - start_time}\n")
     with open(f"{output_dir}/res.json", "w") as f:
-        json.dump(obj, f)
+        json.dump(obj, f, indent=4)
     
     if opt.render:
         for p in ext.parameters():
@@ -404,7 +398,7 @@ def train_gaussian(opt, train_cams, feature_db, gt_ext, writer):
         gaussians.capture(output_dir)
         optimizer = gaussians.double()
         # specially for color rendering
-        progress2 = trange(3000)
+        progress2 = trange(opt.config.render_iter, desc="Rendering iterations")
         stack = []
         count = 0
         for it in progress2:
@@ -415,14 +409,6 @@ def train_gaussian(opt, train_cams, feature_db, gt_ext, writer):
             camera = train_cams[idx]
             pose = ext() @ camera.pose
             depth, normal, color, reachable_mask, var, uncertain = gaussians.render(pose, camera)
-            if camera.idx ==8:
-                if it > 2950:
-                    with torch.no_grad():
-                        render_colors = color
-                        image = render_colors.permute(1,2,0).clamp_max(1).detach().cpu().numpy()
-                        plt.imsave(f"{output_dir}/{it+15000}-color.png", image)
-                count += 1
-                continue
             gt_colors = camera.image.cuda().clone()[reachable_mask]
             loss = l2(gt_colors, color.permute(1, 2, 0)[reachable_mask], w=None)
             loss.backward()
@@ -431,29 +417,58 @@ def train_gaussian(opt, train_cams, feature_db, gt_ext, writer):
             progress2.set_postfix({"loss": f"{loss:.02f}"})
         gaussians.capture(output_dir)
 
+        render_dir = f"{output_dir}/test_render"
+        compare_path = os.path.join(render_dir, "compares")
+        render_path = os.path.join(render_dir, "renders")
+        gts_path = os.path.join(render_dir, "gt")        
+        os.makedirs(compare_path, exist_ok=True)
+        os.makedirs(render_path, exist_ok=True)
+        os.makedirs(gts_path, exist_ok=True)
+        with torch.no_grad():
+            for idx, camera in enumerate(tqdm(train_cams, desc="Rendering progress")):
+                pose = ext() @ camera.pose
+                depth, normal, color, reachable_mask, var, uncertain = gaussians.render(pose, camera)
+                
+                gt = camera.image.cuda().permute(2,0,1)
+                torchvision.utils.save_image(color, os.path.join(render_path, '{0:05d}'.format(idx) + ".png"))
+                torchvision.utils.save_image(gt, os.path.join(gts_path, '{0:05d}'.format(idx) + ".png"))
+                torchvision.utils.save_image(
+                        torch.concat([color, gt], dim=-1),
+                        os.path.join(compare_path, '{0:06d}'.format(idx) + ".png"),
+                    )
+
 def parse_arg(arg, opt):
     parser = ArgumentParser()
-    parser.add_argument("-g")
+    parser.add_argument("--source", '-s')
+    parser.add_argument("--model", '-m')
     parser.add_argument("--render", action="store_true")
-    opt_agrs = parser.parse_args(arg)
-    opt.update(vars(opt_agrs))
-    scene, frame, name = opt.g.split("-")
+    parser.add_argument("--init_method", type=str, choices=["from_lidar", "near", "far"])
+    opt_args = parser.parse_args(arg)
+    
+    # Update the options with parsed arguments, allowing overlap with option.yml
+    for key, value in vars(opt_args).items():
+        if value is not None:  # Only overwrite if the argument is provided
+            if key == "init_method":  # Handle overlap with config.init_method
+                opt.config.init_method = value
+            else:
+                opt[key] = value
+    
+    scene, sframe, name = opt.model.split("/")[1].split("-")
     opt.data.scene = int(scene)
-    opt.data.start_frame = int(frame)
-    opt.data.num = 50
     opt.data.name = name
+    print("scene:", opt.data.scene, "name:", opt.data.name)
 
 
 if __name__ == "__main__":
     opt = parse("option.yml")
     parse_arg(sys.argv[1:], opt)
     random.seed(0)
-    os.makedirs(f"./{opt.output}/{opt.g}", exist_ok=True)
-    writer = SummaryWriter(f"{opt.output}/{opt.g}")
-    train_cams, gt_ext = Loader.load_cams(opt)
+    os.makedirs(opt.model, exist_ok=True)
+    writer = SummaryWriter(opt.model)
+    train_cams, gt_ext, init_ext = Loader.load_cams(opt)
     feature_db = VODB(opt)
 
-    train_gaussian(opt, train_cams, feature_db, gt_ext, writer)
-    print("finish")
+    train_gaussian(opt, train_cams, feature_db, gt_ext, init_ext, writer)
+    print("\nCalibration Finished!")
 
         

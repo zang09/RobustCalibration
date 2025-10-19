@@ -1,4 +1,5 @@
 from PIL import Image
+import json
 from easydict import EasyDict as edict
 import numpy as np
 import os, torch
@@ -12,20 +13,28 @@ def load_cam(idx, image_path):
         width=image.shape[1],
         height=image.shape[0],
         image_name=os.path.split(image_path)[1]
-        )
+    )
     return cam
     
 class Loader():
 
     @staticmethod
     def load_cams(opt):
-        image_dir = os.path.join(opt.data.path, opt.g)
-        image_path = lambda idx: os.path.join(image_dir, f"{idx:02}.png")
-        cams = [load_cam(idx, image_path(idx)) for idx in range(opt.data.num)]
+        base_path = os.path.join(opt.data.path, opt.source)
+        image_list = sorted([f for f in os.listdir(base_path) if f.endswith('.png')])
+        opt.data.num = len(image_list)
+        print("Data number:", opt.data.num)
+        image_paths = [os.path.join(base_path, f) for f in image_list]
+        
+        cams = [load_cam(idx, image_path) for (idx, image_path) in enumerate(image_paths)]
+        
+        # intrinsic, extrinsic, ext0
         calib_path = os.path.join(opt.data.path, "calibs", f"{opt.data.scene:02}.txt")
-        intr, extr, ext0 = Loader.load_calib(calib_path)
-        # load poses
+        intr, gt_extr, ext0 = Loader.load_calib(calib_path)
         poses = Loader.load_poses(opt, ext0)
+        
+        _, _, init_extr = Loader.load_calib_json(base_path)
+        # poses = Loader.load_poses2(base_path, ext0)
         
         for i, cam in enumerate(cams):
             cam.update(
@@ -33,7 +42,7 @@ class Loader():
                 pose = poses[i])
             projection_matrix = Loader.getProjectionMatrix(0.01, 100, cam)
             cam.update(projection_matrix=projection_matrix)
-        return cams, extr
+        return cams, gt_extr, init_extr
 
     @staticmethod
     def getProjectionMatrix(znear, zfar, cam):
@@ -74,41 +83,71 @@ class Loader():
     @staticmethod
     def load_poses(opt, ext0):
         pose_path = os.path.join(opt.data.path, "poses", f"{opt.data.scene:02}.txt")
-        poses_np = np.loadtxt(pose_path)[opt.data.start_frame:opt.data.num+opt.data.start_frame]
+        poses_np = np.loadtxt(pose_path)[:opt.data.num]
         poses = SE3(mat=torch.from_numpy(poses_np).float().reshape(-1, 3, 4).cuda())
         poses = poses @ ext0
+        
+        poses = poses[0].invert() @ poses
+        return poses.invert()
+    
+    @staticmethod
+    def load_poses2(path, extr):
+        pose_path = os.path.join(path, "LiDAR_poses.txt")
+        poses_np = np.loadtxt(pose_path).reshape(-1, 4, 4)
+        poses_np = extr.mat.cpu().numpy() @ poses_np
+        poses = SE3(mat=torch.from_numpy(poses_np).float().cuda())
+                
         poses = poses[0].invert() @ poses
         return poses.invert()
     
     @staticmethod
     def load_calib(calib_file):
-        # calib_file = os.path.join(basic_path, "calib.txt")
         trinsics = torch.from_numpy(np.loadtxt(calib_file, usecols=range(1,13)).reshape(-1, 3, 4)).float()
-        ext0 = SE3(mat=trinsics[4].cuda())
-
-        intr = SE3(R=trinsics[2,:,:3].cuda())
+        ext0 = SE3(mat=trinsics[4].cuda()) # Tr
+        intr = SE3(R=trinsics[2,:,:3].cuda()) # P2
         cam2_0 = trinsics[2,0,3] / trinsics[2,0,0]
-        
         extr = trinsics[4]
         extr[0, 3] += cam2_0
         extr = SE3(mat=extr.cuda())
+        
         return intr, extr, ext0
+    
+    @staticmethod
+    def load_calib_json(path):
+        intr_file = os.path.join(path, "camera-intrinsic.json")
+        intr_data = np.array(json.load(open(intr_file, 'r')))
+        intr = SE3(R=torch.from_numpy(intr_data).float().cuda())
+        
+        extr_file = os.path.join(path, "LiDAR-to-camera.json")
+        extr_data = json.load(open(extr_file, 'r'))
+        extr_gt_np = np.array(extr_data["correct"])
+        extr_init_np = np.array(extr_data["from_lidar"])
+
+        extr_gt = SE3(mat=torch.from_numpy(extr_gt_np).float().cuda())
+        extr_init = SE3(mat=torch.from_numpy(extr_init_np).float().cuda())
+        
+        return intr, extr_gt, extr_init
     
 
 class VODB():
     def __init__(self, opt) -> None:
         base_path = os.path.join(
             opt.data.path,
-            opt.g
+            opt.source
         )
         np_path = os.path.join(base_path, "superpoint-superglue.npy")
         self.features = []
         self.scores = []
-        with open(np_path, "rb") as f:
-            for _ in range(opt.data.num - 1):
-                a = np.load(f)
-                self.features.append((a[:, :2], a[:, 2:4]))
-                self.scores.append(a[:, -1])
+        try:
+            with open(np_path, "rb") as f:
+                for _ in range(opt.data.num - 1):
+                    a = np.load(f)
+                    self.features.append((a[:, :2], a[:, 2:4]))
+                    self.scores.append(a[:, -1])
+        except FileNotFoundError:
+            print(f"Error: File not found at {np_path}")
+        except Exception as e:
+            print(f"An error occurred while loading features: {e}")
     
     def load_corres_pixels(self, img1, img2):
         img1, img2 = int(img1.split(".")[0]), int(img2.split(".")[0])

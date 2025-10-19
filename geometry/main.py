@@ -56,7 +56,6 @@ def get_tensor_values(tensor, p,  mode='nearest',
 
 def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint):
     first_iter = 0
-    dataset.model_path = os.path.join(dataset.output, dataset.g)
     os.makedirs(dataset.model_path, exist_ok=True)
     gaussians = GaussianModel(dataset.sh_degree)
     scene = Scene(dataset, gaussians)
@@ -74,7 +73,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     ema_normal_for_log = 0.0
     progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training progress")
     first_iter += 1
-    outdir = os.path.join(dataset.model_path, "output")
+    outdir = os.path.join(dataset.model_path, "sample")
     os.makedirs(outdir, exist_ok=True)
     start_time = time.time()
     print(dataset.model_path)
@@ -185,7 +184,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 plt.imsave(f"{outdir}/depth_gt{idx}-3d.png", (gt_depth.clamp_max(50)/50).detach().cpu().numpy()[::-1])
                 plt.imsave(f"{outdir}/uncertain{idx}-3d.png", uncertain.clamp_max(1).detach().cpu().numpy()[::-1])
     end_time = time.time()
-    with open("times.txt", "a") as f:
+    with open(f"{dataset.model_path}/times.txt", "w") as f:
         f.write(f"{end_time - start_time}\n")
     torch.save((gaussians.capture(), iteration), os.path.join(dataset.model_path, "2dgs-test.pth"))
 

@@ -1,3 +1,11 @@
 data:
   path: /home/haebeom/data/RobustCalibration
-output: outputs
+config:
+  init_method: far # options: from_lidar, near, far
+  iterations: 15000
+  render_iter: 3000
+  loss_detach_iter: 10000
+  lambda_tri: 1
+  lambda_repr: 200
+  rot_lr: 0.01
+  tran_lr: 0.0005

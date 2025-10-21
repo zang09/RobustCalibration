@@ -21,8 +21,12 @@ class SE3:
                 self._mat[..., :3, :3] = R
                 self._mat[..., :3, 3] = t 
         elif se3 is not None:
-            zeros = torch.tensor([0, 0, 0, 1], dtype=se3.dtype, device=se3.device)
-            self._mat = torch.row_stack((Lie.se3_to_SE3(se3), zeros))
+            Rt = Lie.se3_to_SE3(se3)               # (..., 3, 4)
+            zeros_row = torch.zeros(Rt.shape[:-2] + (1, 4), dtype=Rt.dtype, device=Rt.device)
+            zeros_row[..., 0, 3] = 1.0
+            self._mat = torch.cat([Rt, zeros_row], dim=-2)  # (..., 4, 4)
+        else:
+            raise ValueError("Provide one of (mat, (R,t), se3).")
         self.mat = self._mat
         self.R = self._mat[..., :3, :3]
         self.t = None if (R is not None and t is None) else self._mat[..., :3, 3]
@@ -81,59 +85,139 @@ class Camera:
 
 
 class Lie:
-    """
-    MIT License
-
-    Copyright (c) 2021 Chen-Hsuan Lin
-
-    Reference https://github.com/chenhsuanlin/bundle-adjusting-NeRF/blob/main/LICENSE
-    """
     @staticmethod
-    def so3_to_SO3(w): # [...,3]
+    def so3_to_SO3(w):  # [..., 3]
         wx = Lie.skew_symmetric(w)
-        theta = w.norm(dim=-1)[...,None,None]
-        I = torch.eye(3,device=w.device,dtype=torch.float32)
+        theta = w.norm(dim=-1)[..., None, None]
+        I = torch.eye(3, device=w.device, dtype=w.dtype)
+        I = I.expand(w.shape[:-1] + (3, 3))
         A = Lie.taylor_A(theta)
         B = Lie.taylor_B(theta)
-        R = I+A*wx+B*wx@wx
+        R = I + A * wx + B * (wx @ wx)
         return R
 
     @staticmethod
-    def SO3_to_so3(R,eps=1e-7): # [...,3,3]
-        trace = R[...,0,0]+R[...,1,1]+R[...,2,2]
-        theta = ((trace-1)/2).clamp(-1+eps,1-eps).acos_()[...,None,None]%torch.pi # ln(R) will explode if theta==pi
-        lnR = 1/(2*Lie.taylor_A(theta)+1e-8)*(R-R.transpose(-2,-1)) # FIXME: wei-chiu finds it weird
-        w0,w1,w2 = lnR[...,2,1],lnR[...,0,2],lnR[...,1,0]
-        w = torch.stack([w0,w1,w2],dim=-1)
+    def SO3_to_so3(R, eps=1e-6):  # [..., 3, 3]  -- π-safe
+        R = Lie._project_to_SO3(R)
+        trace = R[..., 0, 0] + R[..., 1, 1] + R[..., 2, 2]
+        cos_theta = (trace - 1.0) * 0.5
+        cos_theta = torch.clamp(cos_theta, -1.0, 1.0)
+        theta = torch.arccos(cos_theta)[..., None, None]
+
+        K = torch.stack([
+            R[..., 2, 1] - R[..., 1, 2],
+            R[..., 0, 2] - R[..., 2, 0],
+            R[..., 1, 0] - R[..., 0, 1]
+        ], dim=-1)
+
+        w = torch.zeros(R.shape[:-2] + (3,), dtype=R.dtype, device=R.device)
+
+        # General case (eps < theta < pi-eps)
+        gen_mask = ((theta > eps) & (torch.pi - theta > eps))[..., 0, 0]
+        if gen_mask.any():
+            sin_theta = torch.sin(theta[gen_mask])
+            w[gen_mask] = (theta[gen_mask][..., 0, 0] / (2.0 * sin_theta[..., 0, 0]))[..., None] * K[gen_mask]
+
+        # Small angle approximation (theta ~ 0)
+        small_mask = (theta <= eps)[..., 0, 0]
+        if small_mask.any():
+            w[small_mask] = 0.5 * K[small_mask]
+
+        # Special handling near π
+        pi_mask = (torch.pi - theta <= 1e-4)[..., 0, 0]
+        if pi_mask.any():
+            Rp = R[pi_mask]
+            rx = torch.sqrt(torch.clamp((Rp[..., 0, 0] + 1) * 0.5, min=0))
+            ry = torch.sqrt(torch.clamp((Rp[..., 1, 1] + 1) * 0.5, min=0))
+            rz = torch.sqrt(torch.clamp((Rp[..., 2, 2] + 1) * 0.5, min=0))
+            axis = torch.zeros(Rp.shape[:-2] + (3,), dtype=R.dtype, device=R.device)
+
+            idx = torch.argmax(torch.stack([rx, ry, rz], dim=-1), dim=-1)
+
+            # x max
+            mask_x = idx == 0
+            if mask_x.any():
+                ax = rx[mask_x]
+                axis_x = torch.stack([
+                    ax,
+                    (Rp[mask_x][..., 0, 1] + Rp[mask_x][..., 1, 0]) / (4 * torch.clamp(ax, min=eps)),
+                    (Rp[mask_x][..., 0, 2] + Rp[mask_x][..., 2, 0]) / (4 * torch.clamp(ax, min=eps)),
+                ], dim=-1)
+                axis[mask_x] = axis_x
+            # y max
+            mask_y = idx == 1
+            if mask_y.any():
+                ay = ry[mask_y]
+                axis_y = torch.stack([
+                    (Rp[mask_y][..., 0, 1] + Rp[mask_y][..., 1, 0]) / (4 * torch.clamp(ay, min=eps)),
+                    ay,
+                    (Rp[mask_y][..., 1, 2] + Rp[mask_y][..., 2, 1]) / (4 * torch.clamp(ay, min=eps)),
+                ], dim=-1)
+                axis[mask_y] = axis_y
+            # z max
+            mask_z = idx == 2
+            if mask_z.any():
+                az = rz[mask_z]
+                axis_z = torch.stack([
+                    (Rp[mask_z][..., 0, 2] + Rp[mask_z][..., 2, 0]) / (4 * torch.clamp(az, min=eps)),
+                    (Rp[mask_z][..., 1, 2] + Rp[mask_z][..., 2, 1]) / (4 * torch.clamp(az, min=eps)),
+                    az,
+                ], dim=-1)
+                axis[mask_z] = axis_z
+
+            axis = axis / torch.clamp(torch.linalg.norm(axis, dim=-1, keepdim=True), min=eps)
+            w[pi_mask] = torch.pi * axis
+
         return w
 
     @staticmethod
-    def se3_to_SE3(wu): # [...,3]
-        w,u = wu.split([3,3],dim=-1)
+    def se3_to_SE3(wu):  # [..., 6] -> [..., 3, 4]
+        w, u = wu.split([3, 3], dim=-1)
         wx = Lie.skew_symmetric(w)
-        theta = w.norm(dim=-1)[...,None,None]
-        I = torch.eye(3,device=w.device,dtype=torch.float32)
+        theta = w.norm(dim=-1)[..., None, None]
+        I = torch.eye(3, device=w.device, dtype=w.dtype).expand(w.shape[:-1] + (3, 3))
         A = Lie.taylor_A(theta)
         B = Lie.taylor_B(theta)
         C = Lie.taylor_C(theta)
-        R = I+A*wx+B*wx@wx
-        V = I+B*wx+C*wx@wx
-        Rt = torch.cat([R,(V@u[...,None])],dim=-1)
+        R = I + A * wx + B * (wx @ wx)
+        V = I + B * wx + C * (wx @ wx)
+        Rt = torch.cat([R, (V @ u[..., None])], dim=-1)
         return Rt
 
     @staticmethod
-    def SE3_to_se3(Rt,eps=1e-8): # [...,3,4]
-        R,t = Rt.split([3,1],dim=-1)
-        w = Lie.SO3_to_so3(R)
+    def SE3_to_se3(Rt, eps=1e-8):  # [..., 3, 4] -> [..., 6]  -- θ≈π 안전화
+        R, t = Rt.split([3, 1], dim=-1)  # R: (...,3,3), t: (...,3,1)
+        R = Lie._project_to_SO3(R)
+        w = Lie.SO3_to_so3(R)            # π-safe
         wx = Lie.skew_symmetric(w)
-        theta = w.norm(dim=-1)[...,None,None]
-        I = torch.eye(3,device=w.device,dtype=torch.float32)
+        theta = w.norm(dim=-1)[..., None, None]
+        I = torch.eye(3, device=Rt.device, dtype=Rt.dtype).expand(R.shape[:-2] + (3, 3))
+
         A = Lie.taylor_A(theta)
         B = Lie.taylor_B(theta)
-        invV = I-0.5*wx+(1-A/(2*B))/(theta**2+eps)*wx@wx
-        u = (invV@t)[...,0]
-        wu = torch.cat([w,u],dim=-1)
-        return wu    
+
+        # V = I + B*wx + ((1 - A)/theta^2) * wx@wx  (Numerically unstable near small angles/π → safe inverse)
+        theta2 = torch.clamp(theta**2, min=eps)
+        V = I + B * wx + ((1 - A) / theta2) * (wx @ wx)
+
+        # Add a small regularization for numerical stabilization before computing the inverse
+        reg = 1e-8
+        Vinv = torch.linalg.inv(V + reg * I)
+        u = (Vinv @ t)[..., 0]
+        return torch.cat([w, u], dim=-1)
+    
+    @staticmethod
+    def _project_to_SO3(R):
+        # R: (..., 3, 3)
+        U, _, Vh = torch.linalg.svd(R)
+        Rp = U @ Vh
+        det = torch.det(Rp)
+        if (det < 0).any():
+            # Flip the last axis to remove reflection
+            Vh_adj = Vh.clone()
+            Vh_adj[det < 0, -1, :] *= -1
+            Rp[det < 0] = U[det < 0] @ Vh_adj[det < 0]
+        return Rp
 
     @staticmethod
     def skew_symmetric(w):

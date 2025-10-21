@@ -1,5 +1,3 @@
-data:
-  path: /home/haebeom/data/RobustCalibration
 config:
   init_method: far # options: from_lidar, near, far
   iterations: 15000

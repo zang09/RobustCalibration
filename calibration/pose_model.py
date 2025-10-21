@@ -23,6 +23,7 @@ class Pose(torch.nn.Module):
             if init is None:
                 raise ValueError("init must be provided for from_lidar initialization")
             self.init = SE3(se3=init.se3())
+            breakpoint()
         elif opt.config.init_method == "near":
             self.init = SE3(se3=torch.tensor([0, 0, 0, 1, 1, 1]).cuda().float() * 0.1) @ self.correct # [R, t]
         elif opt.config.init_method == "far":

@@ -41,7 +41,11 @@ class Scene:
 
         self.train_cameras = {}
         self.test_cameras = {}
-        scene_info = sceneLoadTypeCallbacks["KITTI"](args.source_path, args.scene_dir, args.num, args.start_frame)
+
+        if args.scene_type.lower() == "kitti":
+            scene_info = sceneLoadTypeCallbacks["KITTI"](args.source_path, args.num, args.start_frame)
+        elif args.scene_type.lower() == "custom":
+            scene_info = sceneLoadTypeCallbacks["Custom"](args.source_path)
 
         if not self.loaded_iter:
             json_cams = []

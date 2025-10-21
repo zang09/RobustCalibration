@@ -17,7 +17,7 @@ from scene.gaussian_model import BasicPointCloud
 from scipy.spatial.transform import Rotation
 import math
 from plyfile import PlyData, PlyElement
-
+import open3d as o3d
 
 def storePly(path, xyz, rgb):
     # Define the dtype for the structured array
@@ -46,6 +46,7 @@ def fetchPly(path):
 
 def getPointCloudKitti(ply_path, num, poses, pcs):
     if not os.path.exists(ply_path):
+        print("Generating reflection .ply, will happen only the first time you open the scene.")
         def get_pc(n):
             pc = pcs[n][:, :3]
             refl = pcs[n][:, 3]
@@ -139,7 +140,7 @@ def readKittiCamera(uid, pc, pose, name, pc_path):
 
 def readScanOfKittiPinhole(data_path, pose_path, num, start_frame):
     poses = np.loadtxt(pose_path).reshape(-1, 4, 4)
-    poses = np.linalg.inv(poses[0])@poses
+    poses = np.linalg.inv(poses[0]) @ poses
     cam_infos = []
     pcs = []
     # suppose data is after motion compensation
@@ -152,6 +153,24 @@ def readScanOfKittiPinhole(data_path, pose_path, num, start_frame):
         cam_infos += readKittiCamera(idx, pc, poses[idx], f"{start_frame+idx:06}", pc_path)
     return cam_infos, poses, pcs
 
+def readScanOfCustomPinhole(data_path, pose_path):
+    poses = np.loadtxt(pose_path).reshape(-1, 4, 4)
+    # Make identity
+    poses = np.linalg.inv(poses[0]) @ poses
+    cam_infos = []
+    pcs = []
+    # suppose data is after motion compensation
+    for idx in range(len(poses)):
+        pc_path = os.path.join(data_path, f"{idx:06}.pcd")
+        pc = o3d.io.read_point_cloud(pc_path)
+        xyz = np.asarray(pc.points)
+        reflections = np.asarray(pc.colors)
+        pc = np.column_stack((xyz, reflections[:, 0]))
+        r = pc[:, 0]*pc[:, 0] + pc[:, 1] * pc[:, 1] + pc[:, 2] * pc[:, 2]
+        pc = pc[(r < 50 * 50)]
+        pcs.append(pc)
+        cam_infos += readKittiCamera(idx, pc, poses[idx], f"{idx:06}", pc_path)
+    return cam_infos, poses, pcs
 
 def getNerfppNorm(cam_info):
     def get_center_and_diag(cam_centers):
@@ -184,9 +203,9 @@ class SceneInfo(NamedTuple):
     nerf_normalization: dict
     ply_path: str
 
-def readKittiInfo(path, scene, num, start_frame=0):
-    data_path = os.path.join(path, scene)
-    pose_path = os.path.join(path, scene, "LiDAR_poses.txt")
+def readKittiInfo(path, num, start_frame=0):
+    data_path = os.path.join(path)
+    pose_path = os.path.join(path, "LiDAR_poses.txt")
     train_cam_infos, poses, pcs = readScanOfKittiPinhole(data_path, pose_path, num, start_frame)
     ply_path = os.path.join(data_path, f"points3d_{num:02}_{start_frame:03}.ply")
     pcd = getPointCloudKitti(ply_path, num, poses, pcs)
@@ -199,6 +218,22 @@ def readKittiInfo(path, scene, num, start_frame=0):
                            ply_path=ply_path)
     return scene_info
 
+def readCustomInfo(path):
+    data_path = os.path.join(path, 'pcds')
+    pose_path = os.path.join(path, 'params', 'lidars.txt')
+    ply_path = os.path.join(path, 'lidar', 'input_rf.ply')
+    train_cam_infos, poses, pcs = readScanOfCustomPinhole(data_path, pose_path)
+    pcd = getPointCloudKitti(ply_path, len(poses), poses, pcs)
+    test_cam_infos = []
+    nerf_normalization = getNerfppNorm(train_cam_infos)
+    scene_info = SceneInfo(point_cloud=pcd,
+                           train_cameras=train_cam_infos,
+                           test_cameras=test_cam_infos,
+                           nerf_normalization=nerf_normalization,
+                           ply_path=ply_path)
+    return scene_info
+
 sceneLoadTypeCallbacks = {
-    "KITTI": readKittiInfo
+    "KITTI": readKittiInfo,
+    "Custom": readCustomInfo,
 }

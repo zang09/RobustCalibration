@@ -47,7 +47,7 @@ class ParamGroup:
 class ModelParams(ParamGroup): 
     def __init__(self, parser, opt, sentinel=False):
         self.sh_degree = 3
-        self._source_path = opt.data.path
+        self._source_path = ""
         self._model_path = ""
         self._images = "images"
         self._resolution = -1
@@ -55,21 +55,22 @@ class ModelParams(ParamGroup):
         self.data_device = "cuda"
         # self.scene = 6
         self._num = 50
-        self.start_frame=0
+        self.start_frame = 0
         self.sensor = "Camera"
         self.eval = False
-        self.scene_dir = ""
+        # self.scene_dir = ""
+        self.scene_type = "KITTI" #["KITTI", "Custom"]
         super().__init__(parser, "Loading Parameters", sentinel)
 
-    def extract(self, args):
-        g = super().extract(args)
-        scene, start_frame, t = g.scene_dir.split("-")
-        g.g = g.scene_dir
-        g.scene_dir = os.path.join(g.source_path, g.scene_dir)
-        g.scene = int(scene)
-        g.start_frame = int(start_frame)
-        g.source_path = os.path.abspath(g.source_path)
-        return g
+    # def extract(self, args):
+    #     g = super().extract(args)
+    #     scene, start_frame, t = g.scene_dir.split("-")
+    #     g.g = g.scene_dir
+    #     g.scene_dir = os.path.join(g.source_path, g.scene_dir)
+    #     g.scene = int(scene)
+    #     g.start_frame = int(start_frame)
+    #     g.source_path = os.path.abspath(g.source_path)
+    #     return g
 
 class PipelineParams(ParamGroup):
     def __init__(self, parser):

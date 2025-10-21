@@ -2,7 +2,7 @@ from easydict import EasyDict as edict
 from argparse import ArgumentParser
 from pathlib import Path
 import sys, os, yaml, random, torch
-from loader import Loader, VODB
+from loader import Loader, CustomLoader, VODB
 from pose_model import Pose
 from gaussian_model import GaussianModel
 from tqdm import trange
@@ -254,7 +254,7 @@ def train_gaussian(opt, train_cams, feature_db, gt_ext, init_ext, writer):
     start_time = time.time()
     for it in progress:
         if not stack:
-            stack = list(range(opt.data.num))
+            stack = list(range(opt.data_num))
             random.shuffle(stack)
         idx = stack.pop()
         camera = train_cams[idx]
@@ -295,8 +295,8 @@ def train_gaussian(opt, train_cams, feature_db, gt_ext, init_ext, writer):
                     score_sum += score.detach()
                     score_inv_sum += score_inv.detach()
                     score_num += 1
-        
-        if (idx < opt.data.num - 1):
+
+        if (idx < opt.data_num - 1):
             camera2 = train_cams[idx + 1]
             with torch.no_grad():
                 pose2 = ext() @ camera2.pose
@@ -403,7 +403,7 @@ def train_gaussian(opt, train_cams, feature_db, gt_ext, init_ext, writer):
         count = 0
         for it in progress2:
             if not stack:
-                stack = list(range(opt.data.num))
+                stack = list(range(opt.data_num))
                 random.shuffle(stack)
             idx = stack.pop()
             camera = train_cams[idx]
@@ -427,6 +427,7 @@ def train_gaussian(opt, train_cams, feature_db, gt_ext, init_ext, writer):
         with torch.no_grad():
             for idx, camera in enumerate(tqdm(train_cams, desc="Rendering progress")):
                 pose = ext() @ camera.pose
+                # print("Extrinsic:", ext().mat)
                 depth, normal, color, reachable_mask, var, uncertain = gaussians.render(pose, camera)
                 
                 gt = camera.image.cuda().permute(2,0,1)
@@ -442,6 +443,8 @@ def parse_arg(arg, opt):
     parser.add_argument("--source", '-s')
     parser.add_argument("--model", '-m')
     parser.add_argument("--render", action="store_true")
+    parser.add_argument('--cam_id', type=str, nargs='?', default='-1')
+    parser.add_argument('--loader', type=str)
     parser.add_argument("--init_method", type=str, choices=["from_lidar", "near", "far"])
     opt_args = parser.parse_args(arg)
     
@@ -453,10 +456,10 @@ def parse_arg(arg, opt):
             else:
                 opt[key] = value
     
-    scene, sframe, name = opt.model.split("/")[1].split("-")
-    opt.data.scene = int(scene)
-    opt.data.name = name
-    print("scene:", opt.data.scene, "name:", opt.data.name)
+    # scene, sframe, name = opt.model.split("/")[1].split("-")
+    # opt.data.scene = int(scene)
+    # opt.data.name = name
+    # print("scene:", opt.data.scene, "name:", opt.data.name)
 
 
 if __name__ == "__main__":
@@ -465,7 +468,12 @@ if __name__ == "__main__":
     random.seed(0)
     os.makedirs(opt.model, exist_ok=True)
     writer = SummaryWriter(opt.model)
-    train_cams, gt_ext, init_ext = Loader.load_cams(opt)
+    if opt.loader.lower() == 'kitti':
+        train_cams, gt_ext, init_ext = Loader.load_cams(opt)
+    elif opt.loader.lower() == 'custom':
+        train_cams, gt_ext, init_ext = CustomLoader.load_cams(opt)
+    else:
+        raise ValueError("Invalid loader specified")
     feature_db = VODB(opt)
 
     train_gaussian(opt, train_cams, feature_db, gt_ext, init_ext, writer)
